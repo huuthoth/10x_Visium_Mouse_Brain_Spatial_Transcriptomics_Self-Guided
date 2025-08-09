@@ -1,0 +1,193 @@
+---
+title: "10x_visium_Mouse_Brain_Spatial_transriptomic_workflow_Seurat"
+author: "Copy form Seurat tutorial"
+date: "2025-08-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## R Markdown
+
+This notebook demonstrates analysis, visualization, and integration of spatial datasets using the Seurat toolkit in R.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+##1. Load required libraries
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+```
+```{r}
+##2. Download and Load Example Data and normalization
+InstallData("stxBrain")
+brain <- LoadData("stxBrain", type = "anterior1")
+
+##Visualize QC Metrics
+# Identify mitochondrial genes
+mito_genes <- grep("^mt-", rownames(brain), value = TRUE, ignore.case = TRUE)
+# Calculate percent.mt
+brain[["percent.mt"]] <- PercentageFeatureSet(brain, pattern = "^mt-")
+
+#Calculate Ribosomal Content
+# Ribosomal proteins, large subunit
+brain[["percent.rpl"]] <- PercentageFeatureSet(brain, pattern = "^Rpl")
+
+# Ribosomal proteins, small subunit
+brain[["percent.rps"]] <- PercentageFeatureSet(brain, pattern = "^Rps")
+
+#Total ribosomal content (sum Rpl and Rps)
+brain$percent.ribo <- brain$percent.rpl + brain$percent.rps
+head(brain@meta.data[, c("percent.mt", "percent.rpl", "percent.rps", "percent.ribo")])
+VlnPlot(brain, features = c("percent.mt", "percent.ribo"))
+
+
+VlnPlot(brain, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+VlnPlot(brain, features = "nFeature_Spatial", pt.size = 0.1) + NoLegend()
+
+```
+```{r}
+##Data Normalization with SCTransform
+brain <- SCTransform(brain, assay = "Spatial", verbose = FALSE)
+## Store residuals for all genes
+brain <- SCTransform(brain, assay = "Spatial", return.only.var.genes = FALSE, verbose = FALSE)
+brain <- NormalizeData(brain, verbose = FALSE, assay = "Spatial")
+
+##Compare Normalization Methods
+brain <- GroupCorrelation(brain, group.assay = "Spatial", assay = "Spatial", slot = "data", do.plot = FALSE)
+brain <- GroupCorrelation(brain, group.assay = "Spatial", assay = "SCT", slot = "scale.data", do.plot = FALSE)
+
+p1 <- GroupCorrelationPlot(brain, assay = "Spatial", cor = "nCount_Spatial_cor") + ggtitle("Log Normalization") + theme(plot.title = element_text(hjust = 0.5))
+p2 <- GroupCorrelationPlot(brain, assay = "SCT", cor = "nCount_Spatial_cor") + ggtitle("SCTransform Normalization") + theme(plot.title = element_text(hjust = 0.5))
+p1 + p2
+
+##Spatial Feature Visualization
+
+SpatialFeaturePlot(brain, features = c("Hpca", "Ttr"))
+SpatialDimPlot(brain, interactive = TRUE)
+SpatialFeaturePlot(brain, features = "Ttr", interactive = TRUE)
+```
+
+```{r}
+##3. Dimensionality Reduction, Clustering, and Visualization
+
+brain <- RunPCA(brain, assay = "SCT", verbose = FALSE)
+brain <- FindNeighbors(brain, reduction = "pca", dims = 1:30)
+brain <- FindClusters(brain, verbose = FALSE)
+brain <- RunUMAP(brain, reduction = "pca", dims = 1:30)
+
+p1 <- DimPlot(brain, reduction = "umap", label = TRUE)
+p2 <- SpatialDimPlot(brain, label = TRUE, label.size = 3)
+p1 + p2
+
+SpatialDimPlot(brain, cells.highlight = CellsByIdentities(object = brain, idents = c(2, 1, 4, 3, 5, 8)), facet.highlight = TRUE, ncol = 3)
+```
+
+```{r}
+##4. Identification of Spatially Variable Features
+
+de_markers <- FindMarkers(brain, ident.1 = 5, ident.2 = 6)
+SpatialFeaturePlot(object = brain, features = rownames(de_markers)[1:3], alpha = c(0.1, 1), ncol = 3)
+SpatialFeaturePlot(object = brain, features = "Calb2", alpha = c(0.1, 1))
+
+```
+
+```{r}
+##5. Subset Anatomical Regions
+
+# Subset clusters of interest
+cortex <- subset(brain, idents = c(1, 2, 3, 4, 6, 7))
+
+## Extract spatial coordinates
+centroids <- cortex[["anterior1"]]@boundaries$centroids
+coords <- setNames(as.data.frame(centroids@coords), c("x", "y"))
+rownames(coords) <- centroids@cells
+cortex$x <- coords[colnames(cortex), "x"]
+cortex$y <- coords[colnames(cortex), "y"]
+
+## Spatial subsetting
+cortex <- subset(cortex, y < 2719 | x > 7835, invert = TRUE)
+m <- (9395 - 5747)/(4960 - 7715)
+b <- 5747 - m * 7715
+cortex <- subset(cortex, y > m * x + b, invert = TRUE)
+
+## Visualize
+p1 <- SpatialDimPlot(cortex, crop = TRUE, label = TRUE)
+p2 <- SpatialDimPlot(cortex, crop = FALSE, label = TRUE, pt.size.factor = 1, label.size = 3)
+p1 + p2
+
+SpatialDimPlot(cortex, crop = TRUE, label = TRUE, pt.size.factor = 1.5, label.size = 5)
+```
+
+```{r}
+##6. Integration with Single-Cell Data
+
+setwd("~/Downloads")
+allen_reference <- readRDS("allen_cortex.rds")
+
+library(dplyr)
+allen_reference <- SCTransform(allen_reference, ncells = 3000, verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:30)
+
+cortex <- SCTransform(cortex, assay = "Spatial", verbose = FALSE) %>%
+  RunPCA(verbose = FALSE)
+
+DimPlot(allen_reference, group.by = "subclass", label = TRUE)
+
+anchors <- FindTransferAnchors(reference = allen_reference, query = cortex, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = allen_reference$subclass, prediction.assay = TRUE,
+                                  weight.reduction = cortex[["pca"]], dims = 1:30)
+cortex[["predictions"]] <- predictions.assay
+
+DefaultAssay(cortex) <- "predictions"
+SpatialFeaturePlot(cortex, features = c("L2/3 IT", "L4"), pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+
+```
+
+```{r}
+##7. Identify Spatially Restricted Cell Types
+
+cortex <- FindSpatiallyVariableFeatures(cortex, assay = "predictions", selection.method = "moransi",
+                                        features = rownames(cortex), r.metric = 5, slot = "data")
+top.clusters <- head(SpatiallyVariableFeatures(cortex, selection.method = "moransi"), 4)
+SpatialPlot(object = cortex, features = top.clusters, ncol = 2)
+
+SpatialFeaturePlot(cortex, features = c("Astro", "L2/3 IT", "L4", "L5 PT", "L5 IT", "L6 CT", "L6 IT",
+                                        "L6b", "Oligo"), pt.size.factor = 1, ncol = 2, crop = FALSE, alpha = c(0.1, 1))
+
+```
+
+```{r}
+
+##8. Working with Multiple Slices
+
+brain2 <- LoadData("stxBrain", type = "posterior1")
+brain2 <- SCTransform(brain2, assay = "Spatial", verbose = FALSE)
+
+brain.merge <- merge(brain, brain2)
+
+DefaultAssay(brain.merge) <- "SCT"
+VariableFeatures(brain.merge) <- c(VariableFeatures(brain), VariableFeatures(brain2))
+brain.merge <- RunPCA(brain.merge, verbose = FALSE)
+brain.merge <- FindNeighbors(brain.merge, dims = 1:30)
+brain.merge <- FindClusters(brain.merge, verbose = FALSE)
+brain.merge <- RunUMAP(brain.merge, dims = 1:30)
+
+DimPlot(brain.merge, reduction = "umap", group.by = c("ident", "orig.ident"))
+SpatialDimPlot(brain.merge)
+SpatialFeaturePlot(brain.merge, features = c("Hpca", "Plp1"))
+```
+
+##rmarkdown::render("Visium_Seurat_tutorial.Rmd", output_format = "html_document")
+
+
+
+
+
