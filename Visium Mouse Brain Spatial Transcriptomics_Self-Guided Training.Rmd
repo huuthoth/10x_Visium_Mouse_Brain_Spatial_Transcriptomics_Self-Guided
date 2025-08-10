@@ -1,6 +1,6 @@
 ---
 title: "10x_visium_Mouse_Brain_Spatial_transriptomic_workflow_Seurat"
-author: "Copy form Seurat tutorial"
+author: "Replicate Seurat tutorial"
 date: "2025-08-08"
 output: html_document
 ---
